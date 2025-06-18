@@ -63,7 +63,15 @@ else
     echo -e "${GREEN}✅ uv is already installed${NC}"
 fi
 
-# Check if we're in the right directory
+# Check tkinter availability
+echo -e "${YELLOW}🖼️  Checking tkinter for directory picker...${NC}"
+if python3 -c "import tkinter" 2>/dev/null; then
+    echo -e "${GREEN}✅ tkinter is available${NC}"
+else
+    echo -e "${YELLOW}⚠️  tkinter not found - installing...${NC}"
+    echo "Attempting to install tkinter for Python 3..."
+    brew install python-tk@3.12
+fi
 if [[ ! -f "pyproject.toml" ]]; then
     echo -e "${RED}❌ pyproject.toml not found${NC}"
     echo "Please run this script from the project root directory"

@@ -489,7 +489,7 @@ make setup
 sudo apt-get install python3-tk  # Ubuntu/Debian
 
 # Brew
-brew install python3-tk
+brew install python-tk
 ```
 
 **4. No EXIF data found**
