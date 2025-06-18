@@ -6,8 +6,6 @@ from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
 import os
-import tkinter as tk
-from tkinter import filedialog
 import threading
 import time
 import logging
@@ -333,31 +331,10 @@ def stop_file_monitoring():
         logger.error(f"Error stopping file monitoring: {str(e)}")
 
 def browse_directory():
-    """Open a native directory picker dialog with fallback"""
-    logger.info("Opening directory picker dialog")
-    # Hide the main tkinter window
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)
-    
-    # Open directory picker
-    directory = filedialog.askdirectory(
-        title="Select Photo Directory",
-        initialdir=os.path.expanduser("~")
-    )
-    
-    root.destroy()
-    
-    if directory:
-        st.session_state.selected_directory = directory
-        logger.info(f"Directory selected: {directory}")
-        # Start monitoring the selected directory
-        start_file_monitoring(directory)
-        return directory
-    else:
-        logger.info("Directory selection cancelled")
+    """Simple directory path input - no complex UI dialogs"""
+    # This function is now just a placeholder since we're using text input
     return None
-    
+
 def process_directory_async(directory_path, recursive=True):
     """Process directory in a separate thread to avoid blocking UI"""
     try:
@@ -580,25 +557,39 @@ def main():
     # Directory Browser Section
     if data_source == "🗂️ Browse Photo Directory":
         st.sidebar.markdown("### Directory Selection")
-    
-        # Directory picker button
-        if st.sidebar.button("📂 Browse for Photo Directory", key="browse_btn"):
-            selected_dir = browse_directory()
-            if selected_dir:
-                st.sidebar.success(f"Selected: {selected_dir}")
         
-        # Manual directory input (always available as fallback)
-        st.sidebar.markdown("**Manual Directory Path:**")
+        # Simple directory path input
+        st.sidebar.markdown("**📁 Enter Directory Path:**")
         manual_dir = st.sidebar.text_input(
-            "Enter directory path:",
+            "Photo directory path:",
             value=st.session_state.selected_directory,
-            help="Enter the full path to your photo directory"
+            help="Enter the full path to your photo directory (e.g., /Users/yourname/Photos)",
+            key="manual_dir_input",
+            placeholder="/path/to/your/photos"
         )
         
+        # Quick path suggestions
+        if not st.session_state.selected_directory:
+            st.sidebar.markdown("**Quick suggestions:**")
+            home_dir = os.path.expanduser("~")
+            suggestions = [
+                f"{home_dir}/Pictures",
+                f"{home_dir}/Photos", 
+                f"{home_dir}/Desktop",
+                "/Users/Shared" if os.path.exists("/Users/Shared") else None
+            ]
+            
+            for suggestion in suggestions:
+                if suggestion and os.path.exists(suggestion):
+                    if st.sidebar.button(f"📂 {os.path.basename(suggestion)}", key=f"suggest_{suggestion}"):
+                        st.session_state.selected_directory = suggestion
+                        st.rerun()
+        
+        # Validate and set directory
         if manual_dir and manual_dir != st.session_state.selected_directory:
             if os.path.exists(manual_dir):
                 st.session_state.selected_directory = manual_dir
-                st.sidebar.success(f"Directory set: {manual_dir}")
+                st.sidebar.success(f"Directory set: {os.path.basename(manual_dir)}")
                 start_file_monitoring(manual_dir)
             else:
                 st.sidebar.error("❌ Directory not found!")
@@ -608,36 +599,48 @@ def main():
             st.sidebar.markdown(f"**Current Directory:**")
             st.sidebar.code(st.session_state.selected_directory)
             
+            # Show basic directory info
+            try:
+                photo_count = len([f for f in Path(st.session_state.selected_directory).rglob('*') 
+                                 if f.suffix.lower() in ['.jpg', '.jpeg', '.tiff', '.tif']])
+                st.sidebar.info(f"📊 Found ~{photo_count} photo files")
+            except:
+                pass
+            
             # Processing options
             recursive = st.sidebar.checkbox("Include subdirectories", value=True)
             
             # Process button
             if st.sidebar.button("🔄 Process Photos", key="process_btn"):
                 if os.path.exists(st.session_state.selected_directory):
-                    status_placeholder = st.sidebar.empty()
-                    status_placeholder.info("Processing photos...")
-    
-                    df = st.session_state.analyzer.process_photo_directory(
-                            st.session_state.selected_directory, 
-                            recursive=recursive
-                        )
-                    st.session_state.df = df
-                        
-                    status_placeholder.success(f"✅ Processed {len(df)} photos!")
-                    st.sidebar.success(f"✅ Processed {len(df)} photos!")
-                    
-                    # Auto-generate CSV
-                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    csv_filename = f"photo_metadata_{timestamp}.csv"
-                    csv_data = df.to_csv(index=False)
-                    
-                    st.sidebar.download_button(
-                        label="💾 Download Processed CSV",
-                        data=csv_data,
-                        file_name=csv_filename,
-                        mime="text/csv",
-                        key="download_processed_csv"
-                    )
+                    with st.spinner("Processing photos..."):
+                        try:
+                            df = st.session_state.analyzer.process_photo_directory(
+                                st.session_state.selected_directory, 
+                                recursive=recursive
+                            )
+                            st.session_state.df = df
+                            
+                            if len(df) > 0:
+                                st.sidebar.success(f"✅ Processed {len(df)} photos!")
+                                
+                                # Auto-generate CSV
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                csv_filename = f"photo_metadata_{timestamp}.csv"
+                                csv_data = df.to_csv(index=False)
+                                
+                                st.sidebar.download_button(
+                                    label="💾 Download Processed CSV",
+                                    data=csv_data,
+                                    file_name=csv_filename,
+                                    mime="text/csv",
+                                    key="download_processed_csv"
+                                )
+                            else:
+                                st.sidebar.warning("⚠️ No photos with EXIF data found")
+
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Error: {str(e)}")
                 else:
                     st.sidebar.error("❌ Directory not found!")
         else:
