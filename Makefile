@@ -25,8 +25,8 @@ help:
 
 venv: ## Virtual environment creation
 	@echo "Creating virtual environment..."
-	@$(PYTHON) -m venv $(VENV)
-	@echo "Virtual environment created at $(VENV)"
+	@$(PYTHON) -m venv $(VENV) && source $(VENV)/bin/activate
+	@echo "Virtual environment started at $(VENV)"
 
 deps: ## Install dependencies
 	@echo "Installing dependencies..."
@@ -38,9 +38,13 @@ clean: ## Clean up build artifacts
 	@rm -rf $(VENV) $(BUILD_DIR) $(DIST_DIR) $(CACHE_DIR)
 	@echo "Cleaned up build artifacts"
 
-# Prevent these targets from being matched as files
-.PHONY:  venv deps update-deps clean test help
+start: ## Start the Dash application
+	@echo "Starting the Streamlit dashboard..."
+	@streamlit run streamlit_dashboard.py 
+	@echo  "Streamlit dashboard started"
 
+# Prevent these targets from being matched as files
+.PHONY:  venv deps update-deps clean test help start-dashboard
 # Add this at the bottom of your Makefile to handle arbitrary targets The %: rule at the bottom is necessary to prevent make from throwing errors about non-existent targets when it sees the filename argument.
 %:
     @:

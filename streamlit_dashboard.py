@@ -1,3 +1,7 @@
+# File: streamlit_dashboard.py
+# Location: ./streamlit_dashboard.py
+# Purpose: Enhanced Photography Portfolio Analytics Dashboard with Directory Picker and File Operation Logging
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -5,10 +9,22 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from datetime import datetime
-import os
-# from pathlib import Path
 
-# Import our custom analyzer
+import os
+import tkinter as tk
+from tkinter import filedialog
+import threading
+import time
+import logging
+import tempfile
+import shutil
+import json
+
+from pathlib import Path
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+
 from photo_analyzer.photo_metadata_analyzer import PhotoMetadataAnalyzer
 
 # Page configuration
@@ -19,7 +35,204 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('photo_analytics.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class FileOperationHandler(FileSystemEventHandler):
+    """Watchdog handler to monitor and log file operations"""
+    
+    def __init__(self):
+        self.operations_log = []
+        logger.info("FileOperationHandler initialized")
+    
+    def on_modified(self, event):
+        if not event.is_directory:
+            operation = {
+                'timestamp': datetime.now().isoformat(),
+                'event_type': 'modified',
+                'path': event.src_path,
+                'size': os.path.getsize(event.src_path) if os.path.exists(event.src_path) else 0
+            }
+            self.operations_log.append(operation)
+            logger.info(f"File modified: {event.src_path}")
+    
+    def on_created(self, event):
+        if not event.is_directory:
+            operation = {
+                'timestamp': datetime.now().isoformat(),
+                'event_type': 'created',
+                'path': event.src_path,
+                'size': os.path.getsize(event.src_path) if os.path.exists(event.src_path) else 0
+            }
+            self.operations_log.append(operation)
+            logger.info(f"File created: {event.src_path}")
+    
+    def on_deleted(self, event):
+        if not event.is_directory:
+            operation = {
+                'timestamp': datetime.now().isoformat(),
+                'event_type': 'deleted',
+                'path': event.src_path,
+                'size': 0
+            }
+            self.operations_log.append(operation)
+            logger.info(f"File deleted: {event.src_path}")
+    
+    def get_operations_summary(self):
+        """Get summary of recent file operations"""
+        return {
+            'total_operations': len(self.operations_log),
+            'recent_operations': self.operations_log[-10:] if self.operations_log else [],
+            'operations_by_type': {
+                'created': len([op for op in self.operations_log if op['event_type'] == 'created']),
+                'modified': len([op for op in self.operations_log if op['event_type'] == 'modified']),
+                'deleted': len([op for op in self.operations_log if op['event_type'] == 'deleted'])
+            }
+        }
+
+class StagingManager:
+    """Manages staging area for file operations with preview capabilities"""
+    
+    def __init__(self):
+        self.staging_dir = tempfile.mkdtemp(prefix="photo_analytics_staging_")
+        self.staged_operations = []
+        logger.info(f"StagingManager initialized with staging directory: {self.staging_dir}")
+    
+    def stage_csv_creation(self, df, filename_base):
+        """Stage a CSV file creation operation"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        staged_filename = f"{filename_base}_{timestamp}.csv"
+        staged_path = os.path.join(self.staging_dir, staged_filename)
+        
+        # Create staged file
+        df.to_csv(staged_path, index=False)
+        
+        operation = {
+            'operation_id': f"csv_{timestamp}",
+            'type': 'create_csv',
+            'staged_path': staged_path,
+            'filename': staged_filename,
+            'rows': len(df),
+            'columns': list(df.columns),
+            'size_mb': os.path.getsize(staged_path) / (1024 * 1024),
+            'timestamp': datetime.now().isoformat(),
+            'status': 'staged'
+        }
+        
+        self.staged_operations.append(operation)
+        logger.info(f"CSV creation staged: {staged_filename} ({operation['size_mb']:.2f} MB)")
+        return operation
+    
+    def stage_json_creation(self, data, filename_base):
+        """Stage a JSON file creation operation"""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        staged_filename = f"{filename_base}_{timestamp}.json"
+        staged_path = os.path.join(self.staging_dir, staged_filename)
+        
+        # Create staged file
+        with open(staged_path, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+        
+        operation = {
+            'operation_id': f"json_{timestamp}",
+            'type': 'create_json',
+            'staged_path': staged_path,
+            'filename': staged_filename,
+            'size_mb': os.path.getsize(staged_path) / (1024 * 1024),
+            'timestamp': datetime.now().isoformat(),
+            'status': 'staged'
+        }
+        
+        self.staged_operations.append(operation)
+        logger.info(f"JSON creation staged: {staged_filename} ({operation['size_mb']:.2f} MB)")
+        return operation
+    
+    def preview_operation(self, operation_id):
+        """Get preview information for a staged operation"""
+        operation = next((op for op in self.staged_operations if op['operation_id'] == operation_id), None)
+        if not operation:
+            return None
+        
+        preview = {
+            'operation': operation,
+            'file_exists': os.path.exists(operation['staged_path']),
+            'preview_content': None
+        }
+        
+        if operation['type'] == 'create_csv':
+            # Preview first few rows of CSV
+            try:
+                df_preview = pd.read_csv(operation['staged_path']).head(5)
+                preview['preview_content'] = df_preview.to_dict('records')
+            except Exception as e:
+                preview['preview_content'] = f"Error reading CSV: {str(e)}"
+        
+        elif operation['type'] == 'create_json':
+            # Preview JSON structure
+            try:
+                with open(operation['staged_path'], 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        preview['preview_content'] = {k: str(v)[:100] + '...' if len(str(v)) > 100 else v 
+                                                    for k, v in list(data.items())[:5]}
+                    else:
+                        preview['preview_content'] = str(data)[:500] + '...' if len(str(data)) > 500 else data
+            except Exception as e:
+                preview['preview_content'] = f"Error reading JSON: {str(e)}"
+        
+        return preview
+    
+    def commit_operation(self, operation_id, target_dir=None):
+        """Commit a staged operation to the target directory"""
+        operation = next((op for op in self.staged_operations if op['operation_id'] == operation_id), None)
+        if not operation:
+            return False, "Operation not found"
+        
+        try:
+            if target_dir:
+                target_path = os.path.join(target_dir, operation['filename'])
+                shutil.copy2(operation['staged_path'], target_path)
+                operation['committed_path'] = target_path
+            
+            operation['status'] = 'committed'
+            operation['commit_timestamp'] = datetime.now().isoformat()
+            
+            logger.info(f"Operation committed: {operation['operation_id']} -> {operation.get('committed_path', 'download only')}")
+            return True, "Operation committed successfully"
+        
+        except Exception as e:
+            logger.error(f"Error committing operation {operation_id}: {str(e)}")
+            return False, f"Error: {str(e)}"
+    
+    def get_staged_operations(self):
+        """Get list of all staged operations"""
+        return self.staged_operations
+    
+    def cleanup(self):
+        """Clean up staging directory"""
+        try:
+            shutil.rmtree(self.staging_dir)
+            logger.info(f"Staging directory cleaned up: {self.staging_dir}")
+        except Exception as e:
+            logger.error(f"Error cleaning up staging directory: {str(e)}")
+    
+    def get_staging_summary(self):
+        """Get summary of staging area"""
+        return {
+            'staging_dir': self.staging_dir,
+            'total_operations': len(self.staged_operations),
+            'pending_operations': len([op for op in self.staged_operations if op['status'] == 'staged']),
+            'committed_operations': len([op for op in self.staged_operations if op['status'] == 'committed']),
+            'total_staged_size_mb': sum(op.get('size_mb', 0) for op in self.staged_operations)
+        }
 st.markdown("""
 <style>
     .main-header {
@@ -42,6 +255,37 @@ st.markdown("""
         border-left: 4px solid #01579b;
         margin: 1rem 0;
     }
+    .directory-picker {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border: 2px dashed #dee2e6;
+        margin: 1rem 0;
+    }
+    .success-message {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #28a745;
+        margin: 1rem 0;
+    }
+    .warning-message {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #ffc107;
+        margin: 1rem 0;
+    }
+    .error-message {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #dc3545;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -50,6 +294,105 @@ if 'df' not in st.session_state:
     st.session_state.df = None
 if 'analyzer' not in st.session_state:
     st.session_state.analyzer = PhotoMetadataAnalyzer()
+if 'selected_directory' not in st.session_state:
+    st.session_state.selected_directory = ""
+if 'processing_status' not in st.session_state:
+    st.session_state.processing_status = ""
+if 'file_handler' not in st.session_state:
+    st.session_state.file_handler = FileOperationHandler()
+if 'staging_manager' not in st.session_state:
+    st.session_state.staging_manager = StagingManager()
+if 'observer' not in st.session_state:
+    st.session_state.observer = None
+
+# Log application start
+logger.info("Streamlit Photo Analytics Dashboard started")
+
+def start_file_monitoring(directory):
+    """Start monitoring file operations in the specified directory"""
+    try:
+        if st.session_state.observer:
+            st.session_state.observer.stop()
+            st.session_state.observer.join()
+        
+        st.session_state.observer = Observer()
+        st.session_state.observer.schedule(
+            st.session_state.file_handler, 
+            directory, 
+            recursive=True
+        )
+        st.session_state.observer.start()
+        logger.info(f"File monitoring started for directory: {directory}")
+        return True
+    except Exception as e:
+        logger.error(f"Error starting file monitoring: {str(e)}")
+        return False
+
+def stop_file_monitoring():
+    """Stop file monitoring"""
+    try:
+        if st.session_state.observer:
+            st.session_state.observer.stop()
+            st.session_state.observer.join()
+            st.session_state.observer = None
+            logger.info("File monitoring stopped")
+    except Exception as e:
+        logger.error(f"Error stopping file monitoring: {str(e)}")
+
+def browse_directory():
+    """Open a native directory picker dialog"""
+    try:
+        logger.info("Opening directory picker dialog")
+        # Hide the main tkinter window
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        
+        # Open directory picker
+        directory = filedialog.askdirectory(
+            title="Select Photo Directory",
+            initialdir=os.path.expanduser("~")
+        )
+        
+        root.destroy()
+        
+        if directory:
+            st.session_state.selected_directory = directory
+            logger.info(f"Directory selected: {directory}")
+            # Start monitoring the selected directory
+            start_file_monitoring(directory)
+            return directory
+        else:
+            logger.info("Directory selection cancelled")
+        return None
+    except Exception as e:
+        logger.error(f"Error opening directory picker: {str(e)}")
+        st.error(f"Error opening directory picker: {str(e)}")
+        return None
+
+def process_directory_async(directory_path, recursive=True):
+    """Process directory in a separate thread to avoid blocking UI"""
+    try:
+        logger.info(f"Starting photo processing for directory: {directory_path} (recursive: {recursive})")
+        st.session_state.processing_status = "Processing photos..."
+        
+        df = st.session_state.analyzer.process_photo_directory(directory_path, recursive=recursive)
+        st.session_state.df = df
+        
+        logger.info(f"Photo processing completed. Found {len(df)} photos with metadata")
+        st.session_state.processing_status = f"✅ Successfully processed {len(df)} photos!"
+        
+        # Auto-stage CSV creation
+        if len(df) > 0:
+            staging_op = st.session_state.staging_manager.stage_csv_creation(df, "photo_metadata")
+            logger.info(f"CSV automatically staged: {staging_op['operation_id']}")
+        
+        return df
+    except Exception as e:
+        error_msg = f"Error processing directory: {str(e)}"
+        logger.error(error_msg)
+        st.session_state.processing_status = f"❌ {error_msg}"
+        return None
 
 def load_sample_data():
     """Create sample data for demonstration purposes"""
@@ -218,7 +561,7 @@ def create_location_map(df):
     if len(gps_df) == 0:
         return None
     
-    fig = px.scatter_map(
+    fig = px.scatter_mapbox(
         gps_df,
         lat='latitude',
         lon='longitude',
@@ -239,38 +582,106 @@ def main():
     st.markdown('<h1 class="main-header">📸 Photography Portfolio Analytics</h1>', unsafe_allow_html=True)
     
     # Sidebar for data loading
-    st.sidebar.header("Data Source")
+    st.sidebar.header("📁 Data Source")
     
     data_source = st.sidebar.radio(
         "Choose data source:",
-        ["Load Sample Data", "Upload CSV", "Process Photo Directory"]
+        ["🗂️ Browse Photo Directory", "📊 Load Sample Data", "📤 Upload CSV"]
     )
     
-    if data_source == "Load Sample Data":
-        if st.sidebar.button("Generate Sample Data"):
+    # Directory Browser Section
+    if data_source == "🗂️ Browse Photo Directory":
+        st.sidebar.markdown("### Directory Selection")
+        
+        # Directory picker button
+        if st.sidebar.button("📂 Browse for Photo Directory", key="browse_btn"):
+            selected_dir = browse_directory()
+            if selected_dir:
+                st.sidebar.success(f"Selected: {selected_dir}")
+        
+        # Show selected directory
+        if st.session_state.selected_directory:
+            st.sidebar.markdown(f"**Selected Directory:**")
+            st.sidebar.code(st.session_state.selected_directory)
+            
+            # Processing options
+            recursive = st.sidebar.checkbox("Include subdirectories", value=True)
+            
+            # Process button
+            if st.sidebar.button("🔄 Process Photos", key="process_btn"):
+                if os.path.exists(st.session_state.selected_directory):
+                    st.sidebar.spinner("Processing photos...")
+                    try:
+                        df = st.session_state.analyzer.process_photo_directory(
+                            st.session_state.selected_directory, 
+                            recursive=recursive
+                        )
+                        st.session_state.df = df
+                        
+                        if len(df) > 0:
+                            st.sidebar.success(f"✅ Processed {len(df)} photos!")
+                            
+                            # Auto-generate CSV
+                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                            csv_filename = f"photo_metadata_{timestamp}.csv"
+                            csv_data = df.to_csv(index=False)
+                            
+                            st.sidebar.download_button(
+                                label="💾 Download Processed CSV",
+                                data=csv_data,
+                                file_name=csv_filename,
+                                mime="text/csv",
+                                key="download_processed_csv"
+                            )
+                        else:
+                            st.sidebar.warning("⚠️ No photos with EXIF data found")
+                    except Exception as e:
+                        st.sidebar.error(f"❌ Error: {str(e)}")
+                        logger.error(f"Error processing directory: {str(e)}")
+                else:
+                    st.sidebar.error("❌ Directory not found!")
+        else:
+            st.sidebar.info("👆 Click 'Browse for Photo Directory' to select a folder")
+    
+    # Sample Data Section
+    elif data_source == "📊 Load Sample Data":
+        st.sidebar.markdown("### Sample Data")
+        st.sidebar.info("Load demo data to explore the dashboard features")
+        
+        if st.sidebar.button("🎲 Generate Sample Data"):
             st.session_state.df = load_sample_data()
-            st.sidebar.success("Sample data loaded!")
+            st.sidebar.success("✅ Sample data loaded!")
     
-    elif data_source == "Upload CSV":
-        uploaded_file = st.sidebar.file_uploader("Upload your photo metadata CSV", type=['csv'])
+    # CSV Upload Section
+    elif data_source == "📤 Upload CSV":
+        st.sidebar.markdown("### CSV Upload")
+        uploaded_file = st.sidebar.file_uploader(
+            "Upload your photo metadata CSV", 
+            type=['csv'],
+            help="Upload a CSV file with photo metadata columns"
+        )
+        
         if uploaded_file:
-            st.session_state.df = pd.read_csv(uploaded_file)
-            st.sidebar.success("CSV loaded!")
+            try:
+                st.session_state.df = pd.read_csv(uploaded_file)
+                st.sidebar.success(f"✅ CSV loaded! ({len(st.session_state.df)} rows)")
+            except Exception as e:
+                st.sidebar.error(f"❌ Error loading CSV: {str(e)}")
     
-    elif data_source == "Process Photo Directory":
-        directory_path = st.sidebar.text_input("Enter photo directory path:")
-        if st.sidebar.button("Process Directory") and directory_path:
-            if os.path.exists(directory_path):
-                spinner = st.sidebar.spinner("Processing photos...")
-                st.session_state.df = st.session_state.analyzer.process_photo_directory(directory_path)
-                spinner.empty()
-                st.sidebar.success(f"Processed {len(st.session_state.df)} photos!")
-            else:
-                st.sidebar.error("Directory not found!")
-    
-    # Main dashboard
+    # Main dashboard content
     if st.session_state.df is not None:
         df = st.session_state.df
+        
+        # Show processing summary if from directory
+        if data_source == "🗂️ Browse Photo Directory" and st.session_state.selected_directory:
+            st.markdown(f"""
+            <div class="success-message">
+                <strong>📁 Processing Complete!</strong><br>
+                Directory: <code>{st.session_state.selected_directory}</code><br>
+                Photos processed: <strong>{len(df)}</strong><br>
+                Ready for analysis! 🎉
+            </div>
+            """, unsafe_allow_html=True)
         
         # Key metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -290,6 +701,25 @@ def main():
             gps_photos = len(df.dropna(subset=['latitude', 'longitude'])) if 'latitude' in df.columns else 0
             st.metric("GPS Tagged Photos", gps_photos)
         
+        # Quick insights
+        if len(df) > 0:
+            st.markdown("### 🔍 Quick Insights")
+            
+            insights_col1, insights_col2 = st.columns(2)
+            
+            with insights_col1:
+                if 'camera' in df.columns and not df['camera'].empty:
+                    most_used_camera = df['camera'].mode().iloc[0]
+                    camera_count = df['camera'].value_counts().iloc[0]
+                    camera_pct = (camera_count / len(df) * 100)
+                    st.info(f"🎥 Most used camera: **{most_used_camera}** ({camera_count} photos, {camera_pct:.1f}%)")
+            
+            with insights_col2:
+                if 'iso' in df.columns and not df['iso'].empty:
+                    avg_iso = df['iso'].mean()
+                    max_iso = df['iso'].max()
+                    st.info(f"📊 ISO usage: Average **{avg_iso:.0f}**, Max **{max_iso:.0f}**")
+        
         # Charts
         st.markdown("---")
         
@@ -297,12 +727,14 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            camera_chart = create_camera_usage_chart(df)
-            st.plotly_chart(camera_chart, use_container_width=True)
+            if 'camera' in df.columns:
+                camera_chart = create_camera_usage_chart(df)
+                st.plotly_chart(camera_chart, use_container_width=True)
         
         with col2:
-            lens_chart = create_lens_usage_chart(df)
-            st.plotly_chart(lens_chart, use_container_width=True)
+            if 'lens' in df.columns:
+                lens_chart = create_lens_usage_chart(df)
+                st.plotly_chart(lens_chart, use_container_width=True)
         
         # Camera settings analysis
         settings_chart = create_settings_analysis(df)
@@ -318,48 +750,203 @@ def main():
         if location_map:
             st.plotly_chart(location_map, use_container_width=True)
         
-        # Data export
+        # Data export section
         st.markdown("---")
-        st.subheader("Export Data")
+        st.subheader("💾 Export & Download with Staging")
         
-        col1, col2 = st.columns(2)
+        # Show staging summary
+        staging_summary = st.session_state.staging_manager.get_staging_summary()
+        operations_summary = st.session_state.file_handler.get_operations_summary()
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Staged Operations", staging_summary['pending_operations'])
+        
+        with col2:
+            st.metric("File Operations", operations_summary['total_operations'])
+        
+        with col3:
+            st.metric("Staging Size (MB)", f"{staging_summary['total_staged_size_mb']:.2f}")
+        
+        # Staging operations section
+        st.markdown("### 🎭 Staging Area")
+        
+        tab1, tab2, tab3 = st.tabs(["📄 Create New", "👁️ Preview Staged", "📊 File Operations Log"])
+        
+        with tab1:
+            st.markdown("#### Stage New File Operations")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("📊 Stage CSV Export", key="stage_csv"):
+                    staging_op = st.session_state.staging_manager.stage_csv_creation(df, "photo_metadata")
+                    st.success(f"✅ CSV staged: {staging_op['filename']}")
+                    logger.info(f"User manually staged CSV: {staging_op['operation_id']}")
+            
+            with col2:
+                if st.button("📋 Stage JSON Export", key="stage_json"):
+                    # Create comprehensive JSON export
+                    insights = st.session_state.analyzer.generate_insights(df)
+                    json_data = {
+                        'metadata': {
+                            'export_timestamp': datetime.now().isoformat(),
+                            'total_photos': len(df),
+                            'source_directory': st.session_state.selected_directory
+                        },
+                        'insights': insights,
+                        'photo_data': df.to_dict('records')
+                    }
+                    staging_op = st.session_state.staging_manager.stage_json_creation(json_data, "photo_analysis")
+                    st.success(f"✅ JSON staged: {staging_op['filename']}")
+                    logger.info(f"User manually staged JSON: {staging_op['operation_id']}")
+        
+        with tab2:
+            st.markdown("#### Preview and Commit Staged Operations")
+            
+            staged_ops = st.session_state.staging_manager.get_staged_operations()
+            pending_ops = [op for op in staged_ops if op['status'] == 'staged']
+            
+            if pending_ops:
+                for operation in pending_ops:
+                    with st.expander(f"📁 {operation['filename']} ({operation['size_mb']:.2f} MB)"):
+                        col1, col2 = st.columns([2, 1])
+                        
+                        with col1:
+                            st.write(f"**Type:** {operation['type']}")
+                            st.write(f"**Created:** {operation['timestamp']}")
+                            st.write(f"**Size:** {operation['size_mb']:.2f} MB")
+                            
+                            # Show preview
+                            if st.button(f"🔍 Preview", key=f"preview_{operation['operation_id']}"):
+                                preview = st.session_state.staging_manager.preview_operation(operation['operation_id'])
+                                if preview and preview['preview_content']:
+                                    st.json(preview['preview_content'])
+                        
+                        with col2:
+                            # Download staged file
+                            if os.path.exists(operation['staged_path']):
+                                with open(operation['staged_path'], 'rb') as f:
+                                    file_data = f.read()
+                                
+                                st.download_button(
+                                    label="💾 Download",
+                                    data=file_data,
+                                    file_name=operation['filename'],
+                                    mime="text/csv" if operation['type'] == 'create_csv' else "application/json",
+                                    key=f"download_{operation['operation_id']}"
+                                )
+                                
+                                # Mark as committed after download
+                                if st.button("✅ Mark Committed", key=f"commit_{operation['operation_id']}"):
+                                    success, message = st.session_state.staging_manager.commit_operation(operation['operation_id'])
+                                    if success:
+                                        st.success(message)
+                                        st.rerun()
+                                    else:
+                                        st.error(message)
+            else:
+                st.info("No pending staged operations. Use 'Create New' tab to stage file operations.")
+        
+        with tab3:
+            st.markdown("#### File Operations Monitor")
+            
+            ops_summary = st.session_state.file_handler.get_operations_summary()
+            
+            if ops_summary['total_operations'] > 0:
+                st.write(f"**Total Operations:** {ops_summary['total_operations']}")
+                st.write(f"**Created:** {ops_summary['operations_by_type']['created']}")
+                st.write(f"**Modified:** {ops_summary['operations_by_type']['modified']}")
+                st.write(f"**Deleted:** {ops_summary['operations_by_type']['deleted']}")
+                
+                st.markdown("##### Recent Operations:")
+                for op in ops_summary['recent_operations']:
+                    st.text(f"{op['timestamp']} - {op['event_type'].upper()}: {os.path.basename(op['path'])}")
+            else:
+                st.info("No file operations detected yet.")
+        
+        # Legacy download section (for backward compatibility)
+        st.markdown("### 📥 Quick Downloads")
+        col1, col2, col3 = st.columns(3)
+        
         with col1:
             csv = df.to_csv(index=False)
             st.download_button(
-                label="Download CSV",
+                label="📊 Quick CSV Download",
                 data=csv,
-                file_name=f"photo_metadata_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"photo_metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
         
         with col2:
-            if st.button("Show Raw Data"):
-                st.dataframe(df)
+            # JSON export
+            json_data = df.to_json(orient='records', date_format='iso')
+            st.download_button(
+                label="📋 Quick JSON Download",
+                data=json_data,
+                file_name=f"photo_metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+        
+        with col3:
+            if st.button("👁️ Show Raw Data"):
+                st.dataframe(df, use_container_width=True)
     
     else:
-        st.info("👆 Select a data source from the sidebar to get started!")
-        
-        # Show information about EXIF data
+        # Welcome screen
         st.markdown("""
-        ## What This Dashboard Shows
+        ## 🚀 Welcome to Photography Analytics!
         
-        This photography analytics dashboard helps you understand your shooting patterns by analyzing EXIF metadata from your photos:
+        This dashboard helps you analyze your photography portfolio by extracting and visualizing EXIF metadata from your photos.
         
-        **📊 Equipment Usage**: See which cameras and lenses you use most frequently
+        ### 📋 What You Can Do:
         
-        **⚙️ Camera Settings**: Analyze your aperture, ISO, and focal length preferences
+        **📁 Browse Photo Directory**: Select any folder containing your photos
+        - Automatically extracts EXIF metadata from JPEG/TIFF files
+        - Processes camera settings, GPS coordinates, timestamps
+        - Generates downloadable CSV for further analysis
         
-        **📅 Temporal Patterns**: Discover when you shoot most (time of day, month, weekday)
+        **📊 Interactive Analysis**: Explore your photography patterns
+        - Equipment usage statistics (cameras & lenses)
+        - Camera settings distribution (ISO, aperture, focal length)
+        - Temporal shooting patterns (time of day, monthly trends)
+        - Geographic distribution of GPS-tagged photos
         
-        **📍 Location Insights**: Visualize where your GPS-tagged photos were taken
+        **💾 Export Options**: Download your data
+        - CSV format for spreadsheet analysis
+        - JSON format for programmatic use
+        - Raw data tables for detailed inspection
         
-        **💾 Data Export**: Download your metadata for further analysis
+        ### 🎯 Getting Started:
         
-        ### Getting Started
-        1. Use "Load Sample Data" to see the dashboard in action
-        2. Process your own photo directory to analyze your portfolio
-        3. Upload a pre-processed CSV if you have metadata already extracted
+        1. **Browse for a directory** containing your photos using the sidebar
+        2. **Process the photos** to extract metadata
+        3. **Explore the visualizations** to understand your patterns
+        4. **Download the results** for further analysis
+        
+        ---
+        
+        *Supported formats: JPEG, TIFF with EXIF data*
         """)
+        
+        # Show example of what the analysis looks like
+        st.markdown("### 🎨 Preview: What Your Analysis Will Look Like")
+        
+        if st.button("🎲 See Demo with Sample Data"):
+            st.session_state.df = load_sample_data()
+            st.rerun()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Application interrupted by user")
+    except Exception as e:
+        logger.error(f"Unexpected error in main application: {str(e)}")
+    finally:
+        # Cleanup on exit
+        stop_file_monitoring()
+        if 'staging_manager' in st.session_state:
+            st.session_state.staging_manager.cleanup()
+        logger.info("Application cleanup completed")
