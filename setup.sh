@@ -70,7 +70,7 @@ if python3 -c "import tkinter" 2>/dev/null; then
 else
     echo -e "${YELLOW}⚠️  tkinter not found - installing...${NC}"
     echo "Attempting to install tkinter for Python 3..."
-    brew install python-tk@3.12
+    brew install python-tk
 fi
 if [[ ! -f "pyproject.toml" ]]; then
     echo -e "${RED}❌ pyproject.toml not found${NC}"
